@@ -33,6 +33,8 @@ const orders = new Map(); // orderId -> order
 const webhookEvents = []; // newest first
 const seenEventIds = new Set();
 let coinbaseIntegration = null; // { id, type, name } looked up from Mesh
+const apiLog = []; // server -> Mesh calls, shown in the UI timeline (no secrets, no tokens)
+let apiSeq = 0;
 
 function getSession(req, res) {
   const cookie = req.headers.cookie || '';
@@ -48,8 +50,19 @@ function getSession(req, res) {
 }
 
 // ---------- Mesh API helper ----------
-async function mesh(method, urlPath, body) {
-  const res = await fetch(MESH_BASE_URL + urlPath, {
+function recordApiCall(entry) {
+  apiLog.push({ seq: ++apiSeq, at: new Date().toISOString(), ...entry });
+  if (apiLog.length > 300) apiLog.shift();
+}
+
+// Calls the Mesh API. `ctx.userId` scopes the log entry to one browser session;
+// `ctx.label` is a plain-words description for the demo timeline.
+async function mesh(method, urlPath, body, ctx = {}) {
+  const started = Date.now();
+  const endpoint = urlPath.split('?')[0]; // never log query values
+  let res;
+  try {
+    res = await fetch(MESH_BASE_URL + urlPath, {
     method,
     headers: {
       'Content-Type': 'application/json',
@@ -57,11 +70,20 @@ async function mesh(method, urlPath, body) {
       'X-Client-Secret': MESH_API_KEY,
     },
     body: body ? JSON.stringify(body) : undefined,
-  });
+    });
+  } catch (e) {
+    recordApiCall({ userId: ctx.userId, method, endpoint, status: 0, ms: Date.now() - started, label: ctx.label, error: 'network error' });
+    throw e;
+  }
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  if (!res.ok || (json.status && json.status !== 'ok')) {
+  const failed = !res.ok || (json.status && json.status !== 'ok');
+  recordApiCall({
+    userId: ctx.userId, method, endpoint, status: res.status, ms: Date.now() - started, label: ctx.label,
+    error: failed ? json.message || json.errorType || `HTTP ${res.status}` : undefined,
+  });
+  if (failed) {
     const err = new Error(json.displayMessage || json.message || `Mesh returned HTTP ${res.status}`);
     err.status = res.status >= 400 ? res.status : 502;
     err.mesh = { httpStatus: res.status, status: json.status, message: json.message, errorType: json.errorType };
@@ -76,7 +98,7 @@ async function loadCoinbaseIntegration() {
     return;
   }
   try {
-    const content = await mesh('GET', '/api/v1/transfers/managed/integrations');
+    const content = await mesh('GET', '/api/v1/transfers/managed/integrations', null, { label: 'Startup: load integration catalog' });
     const list = content.integrations || [];
     // In sandbox the Coinbase tile is the "sandboxCoinbase" integration.
     coinbaseIntegration =
@@ -96,6 +118,48 @@ function linkTokenBody(userId, { deepLink, transferOptions }) {
   if (deepLink && coinbaseIntegration) body.integrationId = coinbaseIntegration.id;
   if (transferOptions) body.transferOptions = transferOptions;
   return body;
+}
+
+// ---------- SmartFunding ----------
+// Mesh docs: SmartFunding is an account-level capability that Link applies automatically.
+// There is no link-token field for it (LinkTokenTransferOptions has none), so the
+// payment request stays "merchant receives exactly 50 USDC on Ethereum" either way.
+// What we CAN do with the API is ask Mesh how the user could fund it:
+// POST /api/v1/transfers/managed/quote returns `fundingOptions` (Coinbase only).
+const QUOTE_BROKER_TYPES = new Set(['coinbase']);
+async function smartFundingQuote(s) {
+  const connected = s.connection?.brokerType;
+  // Sandbox rejects "sandboxCoinbase" for quotes but accepts "coinbase".
+  const brokerType = QUOTE_BROKER_TYPES.has(connected) ? connected : 'coinbase';
+  try {
+    const q = await mesh(
+      'POST',
+      '/api/v1/transfers/managed/quote',
+      {
+        amountInFiat: STORE.product.priceUsd,
+        fiatCurrency: 'USD',
+        symbol: STORE.pay.symbol,
+        networkId: STORE.pay.networkId,
+        toAddress: STORE.pay.address,
+        brokerType,
+      },
+      { userId: s.userId, label: 'SmartFunding quote: how can Coinbase fund $50 USDC?' }
+    );
+    return {
+      available: true,
+      brokerType,
+      isEligible: q.isEligible,
+      fundingOptions: (q.fundingOptions || []).map((f) => ({
+        option: f.fundingOption,
+        paymentMethodType: f.paymentMethodType,
+        tradingFeeFiat: f.tradingFeeFiat,
+        paymentMethodFeeFiat: f.paymentMethodFeeFiat,
+      })),
+      fees: q.fees?.inFiat ? { minFeesFiat: q.fees.inFiat.minFeesFiat, maxFeesFiat: q.fees.inFiat.maxFeesFiat, networkFeeFiat: q.fees.inFiat.networkFeeFiat } : null,
+    };
+  } catch (e) {
+    return { available: false, reason: e.message };
+  }
 }
 
 // ---------- app ----------
@@ -133,6 +197,10 @@ app.post('/webhooks/mesh', express.raw({ type: '*/*', limit: '1mb' }), (req, res
       txHash: evt.TxHash,
     });
     webhookEvents.length = Math.min(webhookEvents.length, 100);
+    recordApiCall({
+      direction: 'in', method: 'POST', endpoint: '/webhooks/mesh', status: 200, ms: 0,
+      userId: evt.UserId, label: `Webhook ${evt.TransferStatus || ''}${duplicate ? ' (duplicate EventId, ignored)' : ''}`,
+    });
     if (duplicate) return; // idempotent: same EventId = same event, already applied
     const order = [...orders.values()].find((o) => o.transactionId === evt.TransactionId);
     if (order) {
@@ -169,7 +237,7 @@ app.post('/api/linktoken/connect', async (req, res, next) => {
   try {
     const s = getSession(req, res);
     const body = linkTokenBody(s.userId, { deepLink: req.body?.deepLink !== false });
-    const content = await mesh('POST', '/api/v1/linktoken', body);
+    const content = await mesh('POST', '/api/v1/linktoken', body, { userId: s.userId, label: 'Link token for Connect Coinbase' });
     res.json({ linkToken: content.linkToken });
   } catch (e) { next(e); }
 });
@@ -189,11 +257,14 @@ app.post('/api/linktoken/payment', async (req, res, next) => {
         { networkId: STORE.pay.networkId, symbol: STORE.pay.symbol, address: STORE.pay.address, amount: STORE.pay.amount },
       ],
     };
-    const content = await mesh(
-      'POST',
-      '/api/v1/linktoken',
-      linkTokenBody(s.userId, { deepLink: req.body?.deepLink !== false, transferOptions })
-    );
+    const smartFunding = req.body?.smartFunding === true;
+    const [content, funding] = await Promise.all([
+      mesh('POST', '/api/v1/linktoken', linkTokenBody(s.userId, { deepLink: req.body?.deepLink !== false, transferOptions }), {
+        userId: s.userId,
+        label: `Link token for $50 payment (50 USDC on Ethereum)${smartFunding ? ', SmartFunding on' : ''}`,
+      }),
+      smartFunding ? smartFundingQuote(s) : Promise.resolve(null),
+    ]);
     const order = {
       orderId,
       transactionId,
@@ -205,10 +276,11 @@ app.post('/api/linktoken/payment', async (req, res, next) => {
       network: STORE.pay.networkName,
       toAddress: STORE.pay.address,
       status: 'awaiting_payment',
+      smartFundingRequested: smartFunding,
       createdAt: new Date().toISOString(),
     };
     orders.set(orderId, order);
-    res.json({ linkToken: content.linkToken, order });
+    res.json({ linkToken: content.linkToken, order, smartFunding: funding });
   } catch (e) { next(e); }
 });
 
@@ -232,9 +304,10 @@ app.get('/api/portfolio', async (req, res, next) => {
     const s = getSession(req, res);
     if (!s.connection) return res.status(401).json({ error: 'Connect Coinbase first, then load the portfolio.' });
     const auth = { authToken: s.connection.accessToken, type: s.connection.brokerType };
+    const ctx = { userId: s.userId };
     const [holdings, value] = await Promise.all([
-      mesh('POST', '/api/v1/holdings/get', auth),
-      mesh('POST', '/api/v1/holdings/value', auth).catch(() => null),
+      mesh('POST', '/api/v1/holdings/get', auth, { ...ctx, label: 'Read Coinbase holdings with access token' }),
+      mesh('POST', '/api/v1/holdings/value', auth, { ...ctx, label: 'Read portfolio totals' }).catch(() => null),
     ]);
     const positions = (holdings.cryptocurrencyPositions || [])
       .map((p) => ({
@@ -292,10 +365,15 @@ app.get('/api/orders/:id', async (req, res, next) => {
     if (!order) return res.status(404).json({ error: 'Order not found' });
     try {
       const q = new URLSearchParams({ ClientTransactionId: order.transactionId, Count: '1' });
-      const content = await mesh('GET', `/api/v1/transfers/managed/mesh?${q}`);
+      const content = await mesh('GET', `/api/v1/transfers/managed/mesh?${q}`, null, {
+        userId: order.userId,
+        label: 'Check transfer status by our transactionId',
+      });
       const t = content?.items?.[0];
       if (t) {
         order.meshStatus = t.status;
+        if (typeof t.isSmartFundingTransfer === 'boolean') order.isSmartFundingTransfer = t.isSmartFundingTransfer;
+        if (Array.isArray(t.fundingMethods) && t.fundingMethods.length) order.fundingMethods = t.fundingMethods;
         order.transferId = order.transferId || t.id;
         if (t.hash) order.txHash = t.hash;
         if (t.status === 'succeeded') order.status = 'paid';
@@ -306,6 +384,18 @@ app.get('/api/orders/:id', async (req, res, next) => {
     }
     res.json(order);
   } catch (e) { next(e); }
+});
+
+// SmartFunding preview for the UI toggle (no link token, just the quote)
+app.get('/api/smartfunding/preview', async (req, res) => {
+  res.json(await smartFundingQuote(getSession(req, res)));
+});
+
+// Server-side API activity for this browser session (for the demo timeline)
+app.get('/api/activity', (req, res) => {
+  const s = getSession(req, res);
+  const since = Number(req.query.since || 0);
+  res.json({ calls: apiLog.filter((c) => c.seq > since && (!c.userId || c.userId === s.userId)) });
 });
 
 app.get('/api/webhooks/events', (req, res) => res.json({ enabled: Boolean(MESH_WEBHOOK_SECRET), events: webhookEvents }));

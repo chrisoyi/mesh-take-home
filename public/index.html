@@ -29,6 +29,11 @@
       <h2>Mesh Runner</h2>
       <p class="sub">Lightweight daily trainer. One size, one color, all vibes.</p>
       <div class="price"><span>$50.00</span><small>paid as <b>50 USDC</b> on <b>Ethereum</b></small></div>
+      <label class="toggle">
+        <input type="checkbox" id="sfToggle" />
+        <span><b>Pay with any crypto (SmartFunding)</b><br /><small>You pay from whatever you hold, the store still gets exactly 50 USDC.</small></span>
+      </label>
+      <div id="sfPanel" class="sf" hidden></div>
       <button id="payBtn" class="btn primary">Pay with crypto</button>
       <p class="hint">Opens Mesh Link → Coinbase (sandbox). Login <code>Mesh</code> / <code>Pass123</code>, MFA <code>123456</code>.</p>
     </section>
@@ -52,13 +57,19 @@
       <div id="portfolio" class="empty">Connect Coinbase to read holdings with the access token (via the Mesh API).</div>
     </section>
 
-    <!-- 4. Event log -->
+    <!-- 4. Live timeline -->
     <section class="card wide">
-      <div class="card-head"><h3>Under the hood</h3><span class="sub">Link SDK events + signed webhooks</span></div>
-      <div class="logs">
-        <div><h4>Link events (onEvent)</h4><ol id="eventLog" class="log"></ol></div>
-        <div><h4>Webhooks <span id="whState" class="badge muted">off</span></h4><ol id="webhookLog" class="log"></ol></div>
+      <div class="card-head">
+        <h3>Live timeline</h3>
+        <div class="row">
+          <label class="filter"><input type="checkbox" id="fBrowser" checked /> Link events</label>
+          <label class="filter"><input type="checkbox" id="fServer" checked /> Server → Mesh API</label>
+          <span id="whState" class="badge muted">webhooks off</span>
+          <button id="clearLog" class="btn small ghost">Clear</button>
+        </div>
       </div>
+      <p class="sub">Everything that happens, in order: what Link tells the browser, and every call my server makes to Mesh. Tokens and secrets are masked.</p>
+      <ol id="timeline" class="timeline"></ol>
     </section>
   </main>
   <footer>Mesh sandbox demo · no real funds move · keys never leave the server</footer>

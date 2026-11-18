@@ -2,9 +2,10 @@
 import { createLink } from '@meshconnect/web-link-sdk';
 
 const $ = (id) => document.getElementById(id);
-const usd = (n) => (n == null ? '—' : n.toLocaleString('en-US', { style: 'currency', currency: 'USD' }));
+const usd = (n) => (n == null ? '—' : Number(n).toLocaleString('en-US', { style: 'currency', currency: 'USD' }));
 const qty = (n) => (n == null ? '—' : Number(n).toLocaleString('en-US', { maximumFractionDigits: 8 }));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const short = (v, keep = 6) => (v && String(v).length > keep * 2 + 3 ? `${String(v).slice(0, keep)}…${String(v).slice(-4)}` : v);
 
 let currentOrder = null;
 let accessTokens = []; // kept in page memory so a returning user can pay without logging in again
@@ -29,10 +30,76 @@ function toast(msg) {
   setTimeout(() => t.remove(), 4000);
 }
 
-function logEvent(text) {
-  const li = document.createElement('li');
-  li.innerHTML = `<time>${new Date().toLocaleTimeString()}</time>${esc(text)}`;
-  $('eventLog').prepend(li);
+// ---------- Live timeline ----------
+// Masks anything that looks like a credential before it can reach the screen.
+const SENSITIVE = /token|secret|password|apikey|api_key|authorization|auth|refresh|signature/i;
+function mask(value, depth = 0) {
+  if (depth > 4 || value == null) return value;
+  if (Array.isArray(value)) return value.map((v) => mask(v, depth + 1));
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [k, SENSITIVE.test(k) && v != null && typeof v !== 'object' ? '••••' : mask(v, depth + 1)])
+    );
+  }
+  return value;
+}
+
+const timeline = [];
+function addEntry({ at = new Date(), source, type, summary, ok }) {
+  timeline.push({ at: new Date(at), source, type, summary, ok });
+  renderTimeline();
+}
+function renderTimeline() {
+  const showLink = $('fBrowser').checked;
+  const showServer = $('fServer').checked;
+  const rows = timeline
+    .filter((e) => (e.source === 'server' || e.source === 'webhook' ? showServer : showLink))
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 200)
+    .map((e) => {
+      const cls = e.ok === false ? 'err' : e.ok === true ? 'ok' : '';
+      return `<li><time>${e.at.toLocaleTimeString()}</time><span class="src ${e.source}">${esc(e.source)}</span>
+        <span class="what"><b class="${cls}">${esc(e.type)}</b><span class="detail">${esc(e.summary || '')}</span></span></li>`;
+    })
+    .join('');
+  $('timeline').innerHTML = rows || '<li class="empty-row">Nothing yet. Click Connect Coinbase or Pay with crypto.</li>';
+}
+$('fBrowser').onchange = renderTimeline;
+$('fServer').onchange = renderTimeline;
+$('clearLog').onclick = () => { timeline.length = 0; renderTimeline(); };
+
+// Short, human summary for each Link onEvent type (payloads are masked first)
+function summarizeEvent(ev) {
+  const p = mask(ev.payload || {});
+  const bits = [];
+  if (p.integrationName || p.integrationType) bits.push(p.integrationName || p.integrationType);
+  if (p.page) bits.push(`page: ${p.page}`);
+  if (p.symbol) bits.push(p.symbol);
+  if (p.networkName) bits.push(`on ${p.networkName}`);
+  if (p.amount != null) bits.push(`amount ${p.amount}`);
+  if (p.amountInFiat != null) bits.push(usd(p.amountInFiat));
+  if (p.status) bits.push(`status ${p.status}`);
+  if (p.errorMessage) bits.push(`error: ${p.errorMessage}`);
+  return bits.join(' · ');
+}
+
+// Pull server-side Mesh API calls into the timeline
+let lastSeq = 0;
+async function pollActivity() {
+  try {
+    const { calls } = await api(`/api/activity?since=${lastSeq}`);
+    for (const c of calls) {
+      lastSeq = Math.max(lastSeq, c.seq);
+      const isWebhook = c.direction === 'in';
+      addEntry({
+        at: c.at,
+        source: isWebhook ? 'webhook' : 'server',
+        type: `${c.method} ${c.endpoint} → ${c.status || 'ERR'}`,
+        summary: [c.label, c.ms ? `${c.ms} ms` : '', c.error ? `error: ${c.error}` : ''].filter(Boolean).join(' · '),
+        ok: c.status >= 200 && c.status < 300,
+      });
+    }
+  } catch { /* ignore */ }
 }
 
 // ---------- Mesh Link (one instance, callbacks shared by both flows) ----------
@@ -44,9 +111,17 @@ const link = createLink({
   accessTokens,
   onIntegrationConnected: async (payload) => {
     const t = payload.accessToken;
-    if (!t) { logEvent('integrationConnected (delayed auth, no access token)'); return; }
+    if (!t) {
+      addEntry({ source: 'link', type: 'onIntegrationConnected', summary: 'delayed auth, no access token yet' });
+      return;
+    }
     const acct = t.accountTokens?.[0];
-    logEvent(`integrationConnected → ${t.brokerName} (${t.brokerType})`);
+    addEntry({
+      source: 'link',
+      type: 'onIntegrationConnected',
+      summary: `${t.brokerName} (${t.brokerType}) · account ${acct?.account?.accountName || ''} · access token ••••`,
+      ok: true,
+    });
     accessTokens.splice(0, accessTokens.length, {
       accountId: acct.account.accountId,
       accountName: acct.account.accountName,
@@ -68,7 +143,12 @@ const link = createLink({
     loadPortfolio();
   },
   onTransferFinished: async (payload) => {
-    logEvent(`transferFinished → ${payload.status} ${payload.amount ?? ''} ${payload.symbol ?? ''}`);
+    addEntry({
+      source: 'link',
+      type: 'onTransferFinished',
+      summary: `${payload.status} · ${payload.amount ?? ''} ${payload.symbol ?? ''} on ${payload.networkName || ''} · transfer ${short(payload.transferId) || '—'} · provider accepted, not final on-chain yet`,
+      ok: payload.status === 'success',
+    });
     if (!currentOrder) return;
     try {
       currentOrder = await api(`/api/orders/${currentOrder.orderId}/transfer-finished`, { method: 'POST', body: payload });
@@ -76,9 +156,15 @@ const link = createLink({
       pollOrder();
     } catch (e) { toast(e.message); }
   },
-  onEvent: (ev) => logEvent(ev.type + (ev.payload?.page ? ` (${ev.payload.page})` : '')),
-  onExit: (error) => {
-    logEvent(error ? `exit with error: ${error}` : 'Link closed');
+  onEvent: (ev) => addEntry({ source: 'link', type: `onEvent: ${ev.type}`, summary: summarizeEvent(ev) }),
+  onExit: (error, summary) => {
+    const s = summary ? mask(summary) : null;
+    addEntry({
+      source: 'link',
+      type: 'onExit',
+      summary: error ? `error: ${error}` : `Link closed${s?.page ? ` on ${s.page}` : ''}`,
+      ok: error ? false : undefined,
+    });
     if (error) toast(`Link closed: ${error}`);
   },
 });
@@ -97,16 +183,17 @@ $('connectBtn').onclick = async () => {
   try {
     $('connectBtn').disabled = true;
     const { linkToken } = await api('/api/linktoken/connect', { method: 'POST', body: {} });
-    logEvent('link token created (connect)');
+    addEntry({ source: 'app', type: 'openLink (connect)', summary: 'Got a one-time link token from my server, opening Mesh Link' });
     link.openLink(linkToken);
   } catch (e) { toast(`Could not start Link: ${e.message}`); }
-  finally { $('connectBtn').disabled = false; }
+  finally { $('connectBtn').disabled = false; pollActivity(); }
 };
 
 $('disconnectBtn').onclick = async () => {
   await api('/api/session/connection', { method: 'DELETE' });
   accessTokens.length = 0;
   setConnected(null);
+  addEntry({ source: 'app', type: 'disconnect', summary: 'Access token dropped from server memory' });
   $('portfolio').className = 'empty';
   $('portfolio').textContent = 'Disconnected. Connect Coinbase to read holdings again.';
 };
@@ -135,20 +222,59 @@ async function loadPortfolio() {
   } catch (e) {
     el.className = 'empty';
     el.textContent = e.status === 401 ? e.message : `Could not load portfolio: ${e.message}`;
-  }
+  } finally { pollActivity(); }
 }
+
+// ---------- SmartFunding ----------
+const FUNDING_LABELS = {
+  existingCryptocurrencyBalance: 'USDC you already hold',
+  cryptocurrencyConversion: 'Convert another coin you hold (e.g. ETH, BTC) into USDC',
+  stableCoinNoFeeConversion: 'Swap another stablecoin into USDC, no fee',
+  cryptocurrencyBuyingPowerConversion: 'Convert crypto using buying power',
+  cryptocurrencyMultiStepConversion: 'Multi-step conversion from another coin',
+  buyingPowerPurchase: 'Buy USDC with your Coinbase cash balance',
+  paymentMethodDepositUsage: 'Buy USDC with a linked payment method',
+};
+
+function renderSmartFunding(sf) {
+  const el = $('sfPanel');
+  if (!$('sfToggle').checked) { el.hidden = true; return; }
+  el.hidden = false;
+  if (!sf) { el.innerHTML = 'Checking funding options with Mesh…'; return; }
+  if (!sf.available) {
+    el.innerHTML = `SmartFunding quote not available right now (${esc(sf.reason)}). Checkout still works: Link will ask for USDC directly.`;
+    return;
+  }
+  const items = sf.fundingOptions
+    .map((f) => `<li>${esc(FUNDING_LABELS[f.option] || f.option)}${f.paymentMethodType ? ` (${esc(f.paymentMethodType)})` : ''}${f.tradingFeeFiat ? ` · trading fee ~${usd(f.tradingFeeFiat)}` : ' · no trading fee'}</li>`)
+    .join('');
+  el.innerHTML = `<b>Ways Coinbase can fund this $50 USDC payment</b> (Mesh quote):<ul>${items}</ul>
+    ${sf.fees ? `<small>Estimated total fees ${usd(sf.fees.minFeesFiat)}–${usd(sf.fees.maxFeesFiat)} (network ~${usd(sf.fees.networkFeeFiat)}).</small><br />` : ''}
+    <small>Mesh applies SmartFunding inside Link when the account has it enabled. The store always receives 50 USDC on Ethereum.</small>`;
+}
+
+$('sfToggle').onchange = async () => {
+  renderSmartFunding(null);
+  if (!$('sfToggle').checked) return;
+  addEntry({ source: 'app', type: 'SmartFunding on', summary: 'Asking Mesh how this payment can be funded' });
+  try { renderSmartFunding(await api('/api/smartfunding/preview')); }
+  catch (e) { renderSmartFunding({ available: false, reason: e.message }); }
+  pollActivity();
+};
 
 // ---------- Checkout ----------
 $('payBtn').onclick = async () => {
   try {
     $('payBtn').disabled = true;
-    const { linkToken, order } = await api('/api/linktoken/payment', { method: 'POST', body: {} });
-    currentOrder = order;
+    const smartFunding = $('sfToggle').checked;
+    const res = await api('/api/linktoken/payment', { method: 'POST', body: { smartFunding } });
+    currentOrder = res.order;
+    if (smartFunding) renderSmartFunding(res.smartFunding);
     renderOrder();
-    logEvent(`link token created (payment ${order.orderId})`);
-    link.openLink(linkToken);
+    addEntry({ source: 'app', type: 'openLink (payment)', summary: `Order ${res.order.orderId} · 50 USDC on Ethereum${smartFunding ? ' · SmartFunding on' : ''}` });
+    link.openLink(res.linkToken);
   } catch (e) { toast(`Could not start checkout: ${e.message}`); }
-  finally { $('payBtn').disabled = false; }
+  finally { $('payBtn').disabled = false; pollActivity(); }
 };
 
 $('refreshOrderBtn').onclick = () => refreshOrder();
@@ -157,6 +283,7 @@ async function refreshOrder() {
   if (!currentOrder) return;
   currentOrder = await api(`/api/orders/${currentOrder.orderId}`);
   renderOrder();
+  pollActivity();
   return currentOrder;
 }
 
@@ -181,6 +308,9 @@ function renderOrder() {
   if (!o) return;
   const [label, cls] = STATUS[o.status] || [o.status, 'badge muted'];
   const row = (k, v) => (v == null || v === '' ? '' : `<dt>${k}</dt><dd>${esc(v)}</dd>`);
+  const funding = Array.isArray(o.fundingMethods)
+    ? o.fundingMethods.map((f) => f.type || f.fundingMethod || f.symbol || JSON.stringify(mask(f))).join(', ')
+    : null;
   $('order').className = '';
   $('order').innerHTML = `
     <p><span class="${cls} status">${label}</span></p>
@@ -189,6 +319,8 @@ function renderOrder() {
       ${row('Item', `${o.item} · ${usd(o.priceUsd)}`)}
       ${row('Pay', `${o.amount} ${o.symbol} on ${o.network}`)}
       ${row('To wallet', o.toAddress)}
+      ${row('SmartFunding', o.smartFundingRequested ? `requested${typeof o.isSmartFundingTransfer === 'boolean' ? `, used by Mesh: ${o.isSmartFundingTransfer ? 'yes' : 'no'}` : ''}` : null)}
+      ${row('Funded with', funding)}
       ${row('Transaction ID', o.transactionId)}
       ${row('Mesh transfer', o.transferId)}
       ${row('Mesh status', o.meshStatus)}
@@ -199,24 +331,15 @@ function renderOrder() {
     <p class="note">“Submitted” means Coinbase accepted the transfer (onTransferFinished). It's only final when Mesh reports it succeeded, which the app checks through the transfer history API and webhooks.</p>`;
 }
 
-// ---------- Webhook log ----------
-async function loadWebhooks() {
-  try {
-    const { enabled, events } = await api('/api/webhooks/events');
-    $('whState').textContent = enabled ? 'listening' : 'off (no secret set)';
-    $('whState').className = enabled ? 'badge' : 'badge muted';
-    $('webhookLog').innerHTML = events
-      .map((e) => `<li><time>${new Date(e.receivedAt).toLocaleTimeString()}</time>${esc(e.transferStatus)} ${esc(e.amount ?? '')} ${esc(e.token ?? '')} ${e.duplicate ? '(duplicate, ignored)' : ''}</li>`)
-      .join('');
-  } catch { /* ignore */ }
-}
-
 // ---------- boot ----------
 (async () => {
+  renderTimeline();
   const cfg = await api('/api/config');
   $('envBadge').textContent = cfg.environment;
+  $('whState').textContent = cfg.webhooksEnabled ? 'webhooks listening' : 'webhooks off';
+  $('whState').className = cfg.webhooksEnabled ? 'badge' : 'badge muted';
   setConnected(cfg.connected);
   if (cfg.connected) loadPortfolio();
-  loadWebhooks();
-  setInterval(loadWebhooks, 5000);
+  pollActivity();
+  setInterval(pollActivity, 3000);
 })();
