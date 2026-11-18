@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mesh Runner Store · Pay with crypto</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">◆</span> Mesh Runner Store</div>
+    <div class="badges">
+      <span id="envBadge" class="badge">sandbox</span>
+      <span id="connBadge" class="badge muted">Coinbase not connected</span>
+    </div>
+  </header>
+
+  <main class="grid">
+    <!-- 1. Product + checkout -->
+    <section class="card product">
+      <div class="shoe" aria-hidden="true">
+        <svg viewBox="0 0 240 120" width="100%" height="100%">
+          <defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#6d5dfc"/><stop offset="1" stop-color="#20c997"/></linearGradient></defs>
+          <path d="M20 86 C20 60 46 52 70 50 L98 30 C108 24 120 28 128 36 L150 58 C178 62 214 66 222 84 L222 92 L20 92 Z" fill="url(#g)"/>
+          <rect x="16" y="92" width="210" height="12" rx="6" fill="#1f2433"/>
+          <path d="M104 44 l10 10 M114 38 l10 10 M124 46 l10 10" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <h2>Mesh Runner</h2>
+      <p class="sub">Lightweight daily trainer. One size, one color, all vibes.</p>
+      <div class="price"><span>$50.00</span><small>paid as <b>50 USDC</b> on <b>Ethereum</b></small></div>
+      <button id="payBtn" class="btn primary">Pay with crypto</button>
+      <p class="hint">Opens Mesh Link → Coinbase (sandbox). Login <code>Mesh</code> / <code>Pass123</code>, MFA <code>123456</code>.</p>
+    </section>
+
+    <!-- 2. Order receipt -->
+    <section class="card">
+      <div class="card-head"><h3>Order</h3><button id="refreshOrderBtn" class="btn small ghost" disabled>Check status</button></div>
+      <div id="order" class="empty">No order yet. Click “Pay with crypto”.</div>
+    </section>
+
+    <!-- 3. Portfolio -->
+    <section class="card wide">
+      <div class="card-head">
+        <h3>Coinbase portfolio</h3>
+        <div class="row">
+          <button id="connectBtn" class="btn">Connect Coinbase</button>
+          <button id="portfolioBtn" class="btn ghost" disabled>Refresh</button>
+          <button id="disconnectBtn" class="btn ghost" disabled>Disconnect</button>
+        </div>
+      </div>
+      <div id="portfolio" class="empty">Connect Coinbase to read holdings with the access token (via the Mesh API).</div>
+    </section>
+
+    <!-- 4. Event log -->
+    <section class="card wide">
+      <div class="card-head"><h3>Under the hood</h3><span class="sub">Link SDK events + signed webhooks</span></div>
+      <div class="logs">
+        <div><h4>Link events (onEvent)</h4><ol id="eventLog" class="log"></ol></div>
+        <div><h4>Webhooks <span id="whState" class="badge muted">off</span></h4><ol id="webhookLog" class="log"></ol></div>
+      </div>
+    </section>
+  </main>
+  <footer>Mesh sandbox demo · no real funds move · keys never leave the server</footer>
+  <script src="/app.js"></script>
+</body>
+</html>

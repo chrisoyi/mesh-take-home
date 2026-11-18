@@ -1,0 +1,24 @@
+{
+  "name": "mesh-runner-store",
+  "version": "1.0.0",
+  "description": "Mesh sandbox take-home: connect Coinbase, pay $50 in USDC, show portfolio",
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --minify --outfile=public/app.js --target=es2020",
+    "start": "npm run build && node --env-file-if-exists=.env server.js",
+    "dev": "npm start"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@meshconnect/web-link-sdk": "^3.15.2",
+    "express": "^4.22.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  }
+}
