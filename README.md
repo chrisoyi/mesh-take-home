@@ -148,16 +148,23 @@ Then, in the Mesh Dashboard under **Account → API keys → Access → Allowed 
 | `docs/screenshots/` | Screenshots of the demo |
 
 ## Screenshots
-Screenshots go in `docs/screenshots/`:
+All taken from a real sandbox run (Coinbase sandbox account, Ethereum, USDC).
 
-| | |
+**Order paid: $50 shoes, 50 USDC on Ethereum to the test wallet, with Mesh status and tx hash**
+![Order paid](docs/screenshots/01-order-paid.png)
+
+**SmartFunding on: Mesh quote shows how Coinbase can fund the payment; receipt shows what was used**
+![SmartFunding paid](docs/screenshots/02-smartfunding-paid.png)
+
+**Live timeline: every Link event and every server call to Mesh, in order (tokens masked)**
+
+| Step | Screenshot |
 | - | - |
-| Store and checkout | `docs/screenshots/01-store.png` |
-| Coinbase connected and portfolio | `docs/screenshots/02-coinbase-connected-portfolio.png` |
-| Paying in Mesh Link | `docs/screenshots/03-link-payment.png` |
-| Order paid, with tx hash | `docs/screenshots/04-order-paid.png` |
-| SmartFunding toggle | `docs/screenshots/05-smartfunding-toggle.png` |
-| Live timeline | `docs/screenshots/06-live-timeline.png` |
+| Link token created, Link opened | ![](docs/screenshots/03-timeline-start.png) |
+| SmartFunding quote + payment link token | ![](docs/screenshots/04-timeline-smartfunding-quote.png) |
+| Coinbase connected (access token masked) | ![](docs/screenshots/05-timeline-coinbase-connect.png) |
+| Portfolio read, payment preview, MFA | ![](docs/screenshots/06-timeline-payment-mfa.png) |
+| Transfer executed and completed, status confirmed via API | ![](docs/screenshots/07-timeline-transfer-complete.png) |
 
 ## What I'd add for production
 - Persist orders and tokens in a database.
